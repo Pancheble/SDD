@@ -1,4 +1,4 @@
-# DINO-Style Self-Distilled Diffusion: Centering and Sharpening for Representation Learning in Generative Models
+# Self-Distilled Diffusion: Centering and Sharpening for Representation Learning in Generative Models
 
 **[English](README.md) | [Korean](README.ko.md)**  
 
