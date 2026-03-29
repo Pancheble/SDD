@@ -1,4 +1,4 @@
-# Self-Distilled Diffusion (SDD)
+# Self-Distilled Diffusion : Centering and Sharpening (DiDiCS)
 
 **Self-Distilled Diffusion: Centering and Sharpening for Representation Learning in Generative Models**
 
