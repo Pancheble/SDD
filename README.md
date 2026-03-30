@@ -207,6 +207,3 @@ for x0 in dataloader:
 [13] Dhariwal, P., & Nichol, A. (2021). Diffusion models beat GANs on image synthesis. *NeurIPS 2021*. (ADM)
 
 ---
-
-*Correspondence: [author email placeholder]*  
-*Code: [repository placeholder]*
