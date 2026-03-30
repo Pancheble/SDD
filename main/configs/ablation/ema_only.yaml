@@ -1,0 +1,7 @@
+# configs/ablation/ema_only.yaml  — EMA teacher만, centering+sharpening 없음
+defaults:
+  - ../cifar10
+experiment_name: "ablation_ema_only"
+sdd:
+  centering_enabled: false
+  tau_teacher: 0.1   # τ_t = τ_s

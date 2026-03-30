@@ -1,0 +1,6 @@
+# configs/ablation/no_sharpening.yaml
+defaults:
+  - ../cifar10
+experiment_name: "ablation_no_sharpening"
+sdd:
+  tau_teacher: 0.1   # τ_t = τ_s → sharpening 없음
