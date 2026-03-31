@@ -8,8 +8,6 @@
 
 Diffusion models have achieved remarkable success in generative modeling, yet their internal representations remain poorly structured for downstream discriminative tasks. The standard denoising objective — a mean squared error regression in pixel space — produces smooth, low-discriminability features that underperform compared to dedicated self-supervised representation learners such as DINO. In this work, we propose **Self-Distilled Diffusion (SDD)**, a training framework that augments the standard diffusion objective with a DINO-style self-distillation loss applied directly to UNet intermediate features. Concretely, we maintain an EMA-updated teacher network alongside the student diffusion model, project intermediate features into a shared embedding space, and apply centering and sharpening operations to produce stable, confident training targets. Unlike prior work such as REPA, our method requires no external pretrained encoder and is fully self-contained. We further introduce a timestep-adaptive weighting scheme that restricts the distillation signal to the low-to-middle noise regime, where semantic features are most active. Experiments on standard image generation benchmarks demonstrate that SDD simultaneously improves generation quality (FID) and linear probe accuracy compared to baseline diffusion models, validating that generative and discriminative objectives can be jointly optimized within a single self-distilled framework.
 
-**Keywords:** diffusion models, self-distillation, representation learning, DINO, centering, sharpening, EMA teacher
-
 ---
 
 ## 1. Introduction
