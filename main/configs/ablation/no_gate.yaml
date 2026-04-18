@@ -1,6 +1,0 @@
-# configs/ablation/no_gate.yaml
-defaults:
-  - ../cifar10
-experiment_name: "ablation_no_gate"
-sdd:
-  gate_enabled: false

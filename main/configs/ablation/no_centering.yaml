@@ -1,6 +1,0 @@
-# configs/ablation/no_centering.yaml
-defaults:
-  - ../cifar10
-experiment_name: "ablation_no_centering"
-sdd:
-  centering_enabled: false
