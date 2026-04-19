@@ -1,0 +1,58 @@
+project: sdd_diffusion
+run_name: tiny_imagenet_full_sdd
+dataset:
+  name: tiny_imagenet
+  root: ./data
+  image_size: 64
+  num_classes: 200
+  num_workers: 4
+  train_dir: ./data/tiny-imagenet-200/train
+  val_dir: ./data/tiny-imagenet-200/val
+train:
+  seed: 42
+  epochs: 200
+  batch_size: 64
+  grad_accum_steps: 2
+  lr: 2.0e-4
+  weight_decay: 0.01
+  mixed_precision: true
+  log_every: 50
+  save_every: 5
+  eval_every: 5
+  num_samples_preview: 64
+model:
+  channels: 128
+  channel_mults: [1, 2, 2, 4]
+  num_res_blocks: 2
+  attention_resolutions: [16, 8]
+  dropout: 0.1
+  use_flash_attention: false
+diffusion:
+  timesteps: 1000
+  beta_schedule: linear
+sdd:
+  enabled: true
+  lambda_distill: 0.5
+  teacher_momentum: 0.996
+  teacher_temp: 0.04
+  student_temp: 0.1
+  center_momentum: 0.9
+  use_centering: true
+  use_sharpening: true
+  use_gating: true
+  gating:
+    mode: hard
+    t_min: 0.1
+    t_max: 0.6
+    soft_mid: 0.4
+    soft_beta: 0.08
+  feature_layer: bottleneck
+  projection_dim: 256
+  use_projection_head: true
+wandb:
+  enabled: true
+  project: sdd_diffusion
+  entity: null
+  tags: ["tiny-imagenet", "sdd", "unet", "ablation"]
+output:
+  dir: ./outputs

@@ -1,0 +1,14 @@
+name: soft_gating
+sdd:
+  enabled: true
+  use_centering: true
+  use_sharpening: true
+  use_gating: true
+  gating:
+    mode: soft
+    t_min: 0.1
+    t_max: 0.6
+    soft_mid: 0.4
+    soft_beta: 0.08
+  use_projection_head: true
+  lambda_distill: 0.5

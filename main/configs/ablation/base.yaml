@@ -1,0 +1,8 @@
+name: full_sdd
+sdd:
+  enabled: true
+  use_centering: true
+  use_sharpening: true
+  use_gating: true
+  use_projection_head: true
+  lambda_distill: 0.5
