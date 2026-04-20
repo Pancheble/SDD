@@ -71,6 +71,17 @@ class Upsample(nn.Module):
 
 
 class UNetModel(nn.Module):
+    """UNet diffusion backbone with multi-layer feature extraction support.
+
+    The encoder and decoder are stored as level-structured lists so that
+    Downsample / Upsample modules are applied at the correct channel width
+    (end of each level, before the next level's ResBlocks increase channels).
+
+    down_levels: list[list[nn.Module]]  — one inner list per encoder level
+    up_levels:   list[list[nn.Module]]  — one inner list per decoder level
+    downsamples / upsamples: one module per level boundary
+    """
+
     def __init__(
         self,
         in_channels: int = 3,
@@ -84,6 +95,7 @@ class UNetModel(nn.Module):
         super().__init__()
         self.image_size = image_size
         self.base_channels = base_channels
+        self._channel_mults = channel_mults
         self.time_dim = base_channels * 4
         self.attention_resolutions = set(attention_resolutions)
 
@@ -95,41 +107,52 @@ class UNetModel(nn.Module):
 
         self.input_conv = nn.Conv2d(in_channels, base_channels, 3, padding=1)
 
-        self.down_blocks = nn.ModuleList()
-        self.downsamples = nn.ModuleList()
+        # ── Encoder ──────────────────────────────────────────────────────────
+        # Each level = list of ResBlock/AttentionBlock modules.
+        # Downsample sits between levels (not inside a level).
+        self.down_levels: nn.ModuleList = nn.ModuleList()   # each element is nn.ModuleList
+        self.downsamples: nn.ModuleList = nn.ModuleList()
+
         ch = base_channels
-        self.skip_channels = [ch]
         cur_res = image_size
+        skip_channels: list[int] = [ch]          # track for decoder skip connection dims
 
         for i, mult in enumerate(channel_mults):
             out_ch = base_channels * mult
+            level_blocks: list[nn.Module] = []
             for _ in range(num_res_blocks):
-                self.down_blocks.append(ResBlock(ch, out_ch, self.time_dim, dropout=dropout))
+                level_blocks.append(ResBlock(ch, out_ch, self.time_dim, dropout=dropout))
                 ch = out_ch
-                self.skip_channels.append(ch)
+                skip_channels.append(ch)
                 if cur_res in self.attention_resolutions:
-                    self.down_blocks.append(AttentionBlock(ch))
+                    level_blocks.append(AttentionBlock(ch))
+            self.down_levels.append(nn.ModuleList(level_blocks))
             if i != len(channel_mults) - 1:
                 self.downsamples.append(Downsample(ch))
                 cur_res //= 2
-                self.skip_channels.append(ch)
+                skip_channels.append(ch)
 
+        # ── Bottleneck ────────────────────────────────────────────────────────
         self.mid_block1 = ResBlock(ch, ch, self.time_dim, dropout=dropout)
         self.mid_attn = AttentionBlock(ch)
         self.mid_block2 = ResBlock(ch, ch, self.time_dim, dropout=dropout)
 
-        self.up_blocks = nn.ModuleList()
-        self.upsamples = nn.ModuleList()
+        # ── Decoder ───────────────────────────────────────────────────────────
+        self.up_levels: nn.ModuleList = nn.ModuleList()
+        self.upsamples: nn.ModuleList = nn.ModuleList()
+
         up_mults = list(channel_mults)[::-1]
         up_res = cur_res
         for i, mult in enumerate(up_mults):
             out_ch = base_channels * mult
+            level_blocks = []
             for _ in range(num_res_blocks + 1):
-                skip_ch = self.skip_channels.pop() if self.skip_channels else out_ch
-                self.up_blocks.append(ResBlock(ch + skip_ch, out_ch, self.time_dim, dropout=dropout))
+                skip_ch = skip_channels.pop() if skip_channels else out_ch
+                level_blocks.append(ResBlock(ch + skip_ch, out_ch, self.time_dim, dropout=dropout))
                 ch = out_ch
                 if up_res in self.attention_resolutions:
-                    self.up_blocks.append(AttentionBlock(ch))
+                    level_blocks.append(AttentionBlock(ch))
+            self.up_levels.append(nn.ModuleList(level_blocks))
             if i != len(up_mults) - 1:
                 self.upsamples.append(Upsample(ch))
                 up_res *= 2
@@ -137,45 +160,103 @@ class UNetModel(nn.Module):
         self.out_norm = nn.GroupNorm(8, ch)
         self.out_conv = nn.Conv2d(ch, in_channels, 3, padding=1)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, return_features: bool = False):
+    # ── Compatibility shims for old code that used down_blocks / up_blocks ──
+
+    @property
+    def down_blocks(self) -> list[nn.Module]:
+        """Flat list of all encoder-level modules (ResBlocks + AttentionBlocks)."""
+        return [m for level in self.down_levels for m in level]
+
+    @property
+    def up_blocks(self) -> list[nn.Module]:
+        """Flat list of all decoder-level modules."""
+        return [m for level in self.up_levels for m in level]
+
+    # ── Forward ──────────────────────────────────────────────────────────────
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        return_features: bool = False,
+        feature_layer: str = "bottleneck",
+    ):
+        """
+        Args:
+            x: noisy image tensor (B, C, H, W)
+            t: timestep tensor (B,)
+            return_features: if True, also return a feature vector (B, D)
+            feature_layer: one of:
+                "bottleneck" — global avg-pool of mid-block output  [default]
+                "skip1"      — last encoder ResBlock output before bottleneck
+                "skip2"      — second-to-last encoder ResBlock output
+                "decoder1"   — first decoder ResBlock output
+        """
+        _valid = {"bottleneck", "skip1", "skip2", "decoder1"}
+        if return_features and feature_layer not in _valid:
+            raise ValueError(
+                f"Unknown feature_layer: {feature_layer!r}. "
+                f"Choose from {sorted(_valid)}"
+            )
+
         t_emb = self.time_embed(sinusoidal_embedding(t, self.base_channels))
         h = self.input_conv(x)
-        skips = [h]
+        skips: list[torch.Tensor] = [h]
+        encoder_res_outs: list[torch.Tensor] = []
 
         current = h
-        downsample_idx = 0
-        for module in self.down_blocks:
-            if isinstance(module, ResBlock):
-                current = module(current, t_emb)
+
+        # ── Encoder: iterate levels; Downsample between levels ───────────────
+        for level_idx, level in enumerate(self.down_levels):
+            for module in level:
+                if isinstance(module, ResBlock):
+                    current = module(current, t_emb)
+                    skips.append(current)
+                    encoder_res_outs.append(current)
+                elif isinstance(module, AttentionBlock):
+                    current = module(current)
+            if level_idx < len(self.downsamples):
+                current = self.downsamples[level_idx](current)
                 skips.append(current)
-            elif isinstance(module, AttentionBlock):
-                current = module(current)
 
-        for ds in self.downsamples:
-            current = ds(current)
-            skips.append(current)
-
+        # ── Bottleneck ────────────────────────────────────────────────────────
         bottleneck = self.mid_block1(current, t_emb)
         bottleneck = self.mid_attn(bottleneck)
         bottleneck = self.mid_block2(bottleneck, t_emb)
 
         current = bottleneck
-        for module in self.up_blocks:
-            if isinstance(module, ResBlock):
-                if skips:
-                    skip = skips.pop()
-                    if skip.shape[2:] != current.shape[2:]:
-                        skip = F.interpolate(skip, size=current.shape[2:], mode="nearest")
-                    current = torch.cat([current, skip], dim=1)
-                current = module(current, t_emb)
-            elif isinstance(module, AttentionBlock):
-                current = module(current)
+        decoder_res_outs: list[torch.Tensor] = []
 
-        for us in self.upsamples:
-            current = us(current)
+        # ── Decoder: iterate levels; Upsample between levels ─────────────────
+        for level_idx, level in enumerate(self.up_levels):
+            for module in level:
+                if isinstance(module, ResBlock):
+                    if skips:
+                        skip = skips.pop()
+                        if skip.shape[2:] != current.shape[2:]:
+                            skip = F.interpolate(skip, size=current.shape[2:], mode="nearest")
+                        current = torch.cat([current, skip], dim=1)
+                    current = module(current, t_emb)
+                    decoder_res_outs.append(current)
+                elif isinstance(module, AttentionBlock):
+                    current = module(current)
+            if level_idx < len(self.upsamples):
+                current = self.upsamples[level_idx](current)
 
         out = self.out_conv(F.silu(self.out_norm(current)))
+
         if return_features:
-            feat = bottleneck.mean(dim=(2, 3))
+            if feature_layer == "bottleneck":
+                feat = bottleneck.mean(dim=(2, 3))
+            elif feature_layer == "skip1":
+                src = encoder_res_outs[-1] if encoder_res_outs else bottleneck
+                feat = src.mean(dim=(2, 3))
+            elif feature_layer == "skip2":
+                src = (encoder_res_outs[-2] if len(encoder_res_outs) >= 2
+                       else (encoder_res_outs[-1] if encoder_res_outs else bottleneck))
+                feat = src.mean(dim=(2, 3))
+            elif feature_layer == "decoder1":
+                src = decoder_res_outs[0] if decoder_res_outs else bottleneck
+                feat = src.mean(dim=(2, 3))
             return out, feat
         return out

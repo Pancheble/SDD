@@ -313,3 +313,482 @@ def run_timestep_sweep(base_cfg: Dict[str, Any], sweep: Iterable[tuple[float, fl
         result = run_experiment(cfg, device=device, with_eval=True)
         rows.append({"t_min": t_min, "t_max": t_max, "fid": result.get("fid"), "linear_probe_acc": result.get("linear_probe_acc")})
     return pd.DataFrame(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 1: Feature-layer ablation
+# Compare bottleneck / skip1 / skip2 / decoder1 as distillation targets
+# ─────────────────────────────────────────────────────────────────────────────
+
+FEATURE_LAYERS = ["bottleneck", "skip1", "skip2", "decoder1"]
+
+
+def run_feature_layer_ablation(
+    base_cfg: Dict[str, Any],
+    layers: list[str] | None = None,
+    device: str | None = None,
+) -> pd.DataFrame:
+    """Train one SDD run per feature layer and compare FID + linear probe.
+
+    Args:
+        base_cfg: base experiment config (should have sdd.enabled=True)
+        layers: list of layer names to compare; defaults to all four
+        device: compute device
+
+    Returns:
+        DataFrame with columns [feature_layer, fid, linear_probe_acc]
+    """
+    layers = layers or FEATURE_LAYERS
+    rows = []
+    for layer in layers:
+        cfg = deep_update(base_cfg, {"sdd": {"feature_layer": layer}})
+        cfg["run_name"] = f"{base_cfg['dataset']['name']}_feat_{layer}"
+        save_cfg(cfg, Path(base_cfg["output"]["dir"]) / "configs" / f"{cfg['run_name']}.yaml")
+        result = run_experiment(cfg, device=device, with_eval=True)
+        rows.append(
+            {
+                "feature_layer": layer,
+                "fid": result.get("fid"),
+                "linear_probe_acc": result.get("linear_probe_acc"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 2: Training-curve logger
+# Collect per-epoch FID + linear probe acc to plot convergence
+# ─────────────────────────────────────────────────────────────────────────────
+
+def train_with_curves(
+    cfg: Dict[str, Any],
+    device: str | None = None,
+    eval_every: int | None = None,
+) -> pd.DataFrame:
+    """Train and record FID + linear_probe_acc every N epochs.
+
+    Args:
+        cfg: experiment config
+        device: compute device
+        eval_every: evaluate every this many epochs; defaults to cfg eval_every
+
+    Returns:
+        DataFrame with columns [epoch, loss_total, loss_mse, loss_distill,
+                                 gate_mean, fid, linear_probe_acc]
+    """
+    device = device or DEFAULT_DEVICE
+    set_seed(cfg["train"]["seed"])
+    train_loader, test_loader = build_loaders(cfg)
+    trainer = build_trainer(cfg, device=device)
+    optimizer = make_optimizer(trainer, cfg)
+    run = maybe_init_wandb(cfg)
+    eval_every = eval_every or cfg["train"].get("eval_every", 10)
+
+    use_amp = cfg["train"]["mixed_precision"] and torch.cuda.is_available()
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+    rows = []
+    for epoch in range(cfg["train"]["epochs"]):
+        trainer.state.epoch = epoch
+        metrics = trainer.train_one_epoch(train_loader, optimizer, scaler=scaler, wandb_run=run)
+        row: Dict[str, Any] = {"epoch": epoch, **metrics}
+
+        if (epoch + 1) % eval_every == 0 or epoch == cfg["train"]["epochs"] - 1:
+            gen_metrics = evaluate_generation(trainer, test_loader, cfg)
+            probe_acc = run_linear_probe(trainer, train_loader, test_loader, cfg)
+            row["fid"] = gen_metrics["fid"]
+            row["linear_probe_acc"] = probe_acc
+            if run is not None:
+                run.log({"epoch": epoch, "fid": gen_metrics["fid"], "linear_probe_acc": probe_acc})
+
+        rows.append(row)
+
+        if (epoch + 1) % cfg["train"].get("save_every", 10) == 0:
+            save_checkpoint(trainer, optimizer, cfg, epoch)
+
+    if run is not None:
+        run.finish()
+
+    history = pd.DataFrame(rows)
+    out_dir = Path(cfg["output"]["dir"]) / "logs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    history.to_csv(out_dir / f"{cfg['run_name']}_curve.csv", index=False)
+    return history
+
+
+def compare_training_curves(
+    base_cfg: Dict[str, Any],
+    variants: Dict[str, Dict[str, Any]],
+    device: str | None = None,
+) -> Dict[str, pd.DataFrame]:
+    """Run train_with_curves for each variant and return {name: DataFrame}."""
+    results = {}
+    for name, overrides in variants.items():
+        cfg = deep_update(base_cfg, overrides)
+        cfg["run_name"] = f"{base_cfg['dataset']['name']}_{name}_curve"
+        results[name] = train_with_curves(cfg, device=device)
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 3: Gating distribution analysis
+# Record per-step timestep histogram and gate_mean to understand which
+# timesteps actually receive distillation signal
+# ─────────────────────────────────────────────────────────────────────────────
+
+def collect_gate_histogram(
+    trainer,
+    loader: DataLoader,
+    n_batches: int = 50,
+) -> Dict[str, Any]:
+    """Collect timestep samples and their gate values for one epoch slice.
+
+    Returns dict with:
+        timesteps: np.ndarray shape (N,)
+        gate_values: np.ndarray shape (N,)
+        t_min, t_max, mode: gating config used
+    """
+    import numpy as np
+    from src.sdd.gating import timestep_gate
+
+    cfg_gate = trainer.cfg["sdd"]["gating"]
+    t_min = cfg_gate["t_min"]
+    t_max = cfg_gate["t_max"]
+    mode = cfg_gate["mode"]
+    soft_beta = cfg_gate.get("soft_beta", 0.08)
+    T = trainer.diffusion.timesteps
+
+    all_t, all_g = [], []
+    for i, (x, _) in enumerate(loader):
+        if i >= n_batches:
+            break
+        x = x.to(trainer.device)
+        t = torch.randint(0, T, (x.size(0),), device=trainer.device)
+        g = timestep_gate(t, T, mode=mode, t_min=t_min, t_max=t_max, soft_beta=soft_beta)
+        all_t.append(t.cpu().numpy())
+        all_g.append(g.cpu().numpy())
+
+    return {
+        "timesteps": np.concatenate(all_t),
+        "gate_values": np.concatenate(all_g),
+        "t_min": t_min,
+        "t_max": t_max,
+        "mode": mode,
+        "T": T,
+    }
+
+
+def run_gating_analysis(
+    base_cfg: Dict[str, Any],
+    gating_configs: Dict[str, Dict[str, Any]] | None = None,
+    device: str | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Compare gate distributions for hard vs soft gating (and custom configs).
+
+    Args:
+        base_cfg: full experiment config
+        gating_configs: optional dict of {name: sdd.gating overrides};
+                        defaults to hard vs soft comparison
+        device: compute device
+
+    Returns:
+        dict {name: gate_histogram_dict}
+    """
+    if gating_configs is None:
+        gating_configs = {
+            "hard": {"sdd": {"gating": {"mode": "hard"}}},
+            "soft": {"sdd": {"gating": {"mode": "soft", "soft_beta": 0.08}}},
+            "soft_narrow": {"sdd": {"gating": {"mode": "soft", "soft_beta": 0.04}}},
+        }
+
+    device = device or DEFAULT_DEVICE
+    _, train_loader = build_loaders(base_cfg)  # we only need the timestep sampler
+    train_loader, _ = build_loaders(base_cfg)
+
+    results = {}
+    for name, overrides in gating_configs.items():
+        cfg = deep_update(base_cfg, overrides)
+        # We only need the trainer to get gating config; no full training
+        trainer = build_trainer(cfg, device=device)
+        results[name] = collect_gate_histogram(trainer, train_loader)
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 4: EMA momentum sweep
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_ema_momentum_sweep(
+    base_cfg: Dict[str, Any],
+    momentum_values: list[float] | None = None,
+    device: str | None = None,
+) -> pd.DataFrame:
+    """Train with different EMA teacher momentum values and compare metrics.
+
+    Args:
+        base_cfg: base experiment config
+        momentum_values: list of momentum floats; defaults to [0.990, 0.996, 0.999]
+        device: compute device
+
+    Returns:
+        DataFrame with columns [teacher_momentum, fid, linear_probe_acc]
+    """
+    momentum_values = momentum_values or [0.990, 0.996, 0.999]
+    rows = []
+    for m in momentum_values:
+        cfg = deep_update(base_cfg, {"sdd": {"teacher_momentum": m}})
+        cfg["run_name"] = f"{base_cfg['dataset']['name']}_ema_{str(m).replace('.', '')}"
+        save_cfg(cfg, Path(base_cfg["output"]["dir"]) / "configs" / f"{cfg['run_name']}.yaml")
+        result = run_experiment(cfg, device=device, with_eval=True)
+        rows.append(
+            {
+                "teacher_momentum": m,
+                "fid": result.get("fid"),
+                "linear_probe_acc": result.get("linear_probe_acc"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 5: Generated sample grid
+# ─────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def generate_sample_grid(
+    trainer,
+    cfg: Dict[str, Any],
+    n: int = 64,
+    seed: int = 0,
+    save_path: str | Path | None = None,
+):
+    """Generate n samples and return them as a (n, C, H, W) uint8 tensor.
+
+    Also saves a PNG grid to save_path (or outputs/samples/<run_name>_grid.png).
+
+    Args:
+        trainer: trained SDDTrainer
+        cfg: experiment config
+        n: number of samples to generate
+        seed: random seed for reproducibility
+        save_path: override output file path
+
+    Returns:
+        samples tensor, shape (n, C, H, W) in [0, 255] uint8
+    """
+    import torchvision.utils as vutils
+    import matplotlib.pyplot as plt
+
+    torch.manual_seed(seed)
+    shape = (
+        3,
+        cfg["dataset"]["image_size"],
+        cfg["dataset"]["image_size"],
+    )
+    samples = trainer.sample(n=n, shape=shape)         # (-1, 1)
+    samples_01 = (samples * 0.5 + 0.5).clamp(0, 1)    # (0, 1)
+
+    grid = vutils.make_grid(samples_01, nrow=8, padding=2)  # (C, H, W)
+    grid_np = grid.permute(1, 2, 0).cpu().numpy()
+
+    if save_path is None:
+        out_dir = Path(cfg["output"]["dir"]) / "samples"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save_path = out_dir / f"{cfg['run_name']}_grid.png"
+
+    plt.figure(figsize=(12, 12 * grid_np.shape[0] / grid_np.shape[1]))
+    plt.imshow(grid_np)
+    plt.axis("off")
+    plt.tight_layout(pad=0)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    return (samples_01 * 255).to(torch.uint8)
+
+
+def generate_comparison_grid(
+    trainers: Dict[str, "SDDTrainer"],
+    cfgs: Dict[str, Dict[str, Any]],
+    n_per_variant: int = 8,
+    seed: int = 0,
+    save_path: str | Path | None = None,
+) -> Path:
+    """Generate side-by-side sample grids for multiple variants.
+
+    Each row in the output image corresponds to one variant.
+
+    Args:
+        trainers: {variant_name: trainer}
+        cfgs: {variant_name: config}
+        n_per_variant: samples per variant (one row)
+        seed: shared seed for fair comparison
+        save_path: output PNG path
+
+    Returns:
+        Path to saved image
+    """
+    import torchvision.utils as vutils
+    import matplotlib.pyplot as plt
+
+    rows = []
+    for name, trainer in trainers.items():
+        cfg = cfgs[name]
+        torch.manual_seed(seed)
+        shape = (3, cfg["dataset"]["image_size"], cfg["dataset"]["image_size"])
+        samples = trainer.sample(n=n_per_variant, shape=shape)
+        samples_01 = (samples * 0.5 + 0.5).clamp(0, 1)
+        rows.append(samples_01)
+
+    all_samples = torch.cat(rows, dim=0)  # (n_variants * n_per_variant, C, H, W)
+    grid = vutils.make_grid(all_samples, nrow=n_per_variant, padding=2)
+    grid_np = grid.permute(1, 2, 0).cpu().numpy()
+
+    if save_path is None:
+        out_dir = Path(list(cfgs.values())[0]["output"]["dir"]) / "samples"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save_path = out_dir / "comparison_grid.png"
+
+    fig, ax = plt.subplots(figsize=(n_per_variant * 1.5, len(trainers) * 1.5))
+    ax.imshow(grid_np)
+    ax.set_yticks(
+        [(i + 0.5) * grid_np.shape[0] / len(trainers) for i in range(len(trainers))]
+    )
+    ax.set_yticklabels(list(trainers.keys()), fontsize=11)
+    ax.set_xticks([])
+    plt.tight_layout(pad=0.5)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return Path(save_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment 6: UMAP / t-SNE feature visualization (baseline vs SDD)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def extract_features_for_viz(
+    trainer,
+    loader: DataLoader,
+    feature_layer: str = "bottleneck",
+    max_samples: int = 2000,
+) -> tuple:
+    """Extract features + labels, capped at max_samples for fast projection."""
+    from src.evaluation.feature_extract import extract_features
+
+    feats, labels = extract_features(trainer.model, loader, trainer.device, feature_layer=feature_layer)
+    if feats.shape[0] > max_samples:
+        idx = torch.randperm(feats.shape[0])[:max_samples]
+        feats, labels = feats[idx], labels[idx]
+    return feats.numpy(), labels.numpy()
+
+
+def run_umap_comparison(
+    trainers: Dict[str, "SDDTrainer"],
+    loader: DataLoader,
+    feature_layer: str = "bottleneck",
+    max_samples: int = 2000,
+    save_path: str | Path | None = None,
+    class_names: list[str] | None = None,
+) -> Path:
+    """UMAP projection of features for each variant, plotted side by side.
+
+    Args:
+        trainers: {name: SDDTrainer}
+        loader: DataLoader (typically test_loader)
+        feature_layer: which layer to extract from
+        max_samples: cap for UMAP speed
+        save_path: output PNG path
+        class_names: optional list of class name strings for legend
+
+    Returns:
+        Path to saved figure
+    """
+    try:
+        import umap
+    except ImportError as e:
+        raise ImportError("pip install umap-learn") from e
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+
+    n = len(trainers)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5))
+    if n == 1:
+        axes = [axes]
+
+    for ax, (name, trainer) in zip(axes, trainers.items()):
+        feats_np, labels_np = extract_features_for_viz(trainer, loader, feature_layer, max_samples)
+        reducer = umap.UMAP(n_components=2, random_state=42)
+        embedding = reducer.fit_transform(feats_np)
+        n_classes = int(labels_np.max()) + 1
+        colors = cm.get_cmap("tab10", n_classes)
+        for cls in range(n_classes):
+            mask = labels_np == cls
+            label = class_names[cls] if class_names else str(cls)
+            ax.scatter(embedding[mask, 0], embedding[mask, 1], s=6, alpha=0.6,
+                       color=colors(cls), label=label)
+        ax.set_title(name, fontsize=13)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        if class_names:
+            ax.legend(markerscale=2, fontsize=7, loc="best")
+
+    fig.suptitle(f"UMAP — feature layer: {feature_layer}", fontsize=14)
+    plt.tight_layout()
+
+    if save_path is None:
+        save_path = Path("outputs/figures/umap_comparison.png")
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return Path(save_path)
+
+
+def run_tsne_comparison(
+    trainers: Dict[str, "SDDTrainer"],
+    loader: DataLoader,
+    feature_layer: str = "bottleneck",
+    max_samples: int = 2000,
+    save_path: str | Path | None = None,
+    class_names: list[str] | None = None,
+) -> Path:
+    """t-SNE projection of features for each variant, plotted side by side.
+
+    Same signature as run_umap_comparison; use when umap-learn is unavailable.
+    """
+    from sklearn.manifold import TSNE
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+
+    n = len(trainers)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5))
+    if n == 1:
+        axes = [axes]
+
+    for ax, (name, trainer) in zip(axes, trainers.items()):
+        feats_np, labels_np = extract_features_for_viz(trainer, loader, feature_layer, max_samples)
+        embedding = TSNE(n_components=2, init="pca", learning_rate="auto",
+                         perplexity=30, random_state=42).fit_transform(feats_np)
+        n_classes = int(labels_np.max()) + 1
+        colors = cm.get_cmap("tab10", n_classes)
+        for cls in range(n_classes):
+            mask = labels_np == cls
+            label = class_names[cls] if class_names else str(cls)
+            ax.scatter(embedding[mask, 0], embedding[mask, 1], s=6, alpha=0.6,
+                       color=colors(cls), label=label)
+        ax.set_title(name, fontsize=13)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        if class_names:
+            ax.legend(markerscale=2, fontsize=7, loc="best")
+
+    fig.suptitle(f"t-SNE — feature layer: {feature_layer}", fontsize=14)
+    plt.tight_layout()
+
+    if save_path is None:
+        save_path = Path("outputs/figures/tsne_comparison.png")
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return Path(save_path)

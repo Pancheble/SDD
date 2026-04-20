@@ -20,6 +20,19 @@ class TrainState:
     epoch: int = 0
 
 
+def _feat_dim_for_layer(config: Dict[str, Any], layer: str) -> int:
+    """Return the channel width of a named intermediate feature layer."""
+    ch = config["model"]["channels"]
+    mults = config["model"]["channel_mults"]
+    dim_map = {
+        "bottleneck": ch * mults[-1],
+        "skip1":      ch * mults[-2] if len(mults) >= 2 else ch * mults[-1],
+        "skip2":      ch * mults[-3] if len(mults) >= 3 else ch * mults[-1],
+        "decoder1":   ch * mults[-1],
+    }
+    return dim_map.get(layer, ch * mults[-1])
+
+
 class SDDTrainer:
     def __init__(self, model, config: Dict[str, Any], device: str | torch.device):
         self.model = model.to(device)
@@ -31,6 +44,7 @@ class SDDTrainer:
             device=device,
         )
         self.use_sdd = config["sdd"]["enabled"]
+        self.feature_layer: str = config["sdd"].get("feature_layer", "bottleneck")
         self.teacher = clone_model(self.model) if self.use_sdd else None
         self.proj_student = None
         self.proj_teacher = None
@@ -38,7 +52,7 @@ class SDDTrainer:
 
         if self.use_sdd and config["sdd"].get("use_projection_head", True):
             proj_dim = config["sdd"]["projection_dim"]
-            feat_dim = config["model"]["channels"] * config["model"]["channel_mults"][-1]
+            feat_dim = _feat_dim_for_layer(config, self.feature_layer)
             self.proj_student = ProjectionHead(feat_dim, proj_dim=proj_dim).to(device)
             self.proj_teacher = ProjectionHead(feat_dim, proj_dim=proj_dim).to(device)
             self.proj_teacher.load_state_dict(self.proj_student.state_dict())
@@ -66,13 +80,17 @@ class SDDTrainer:
 
             use_amp = self.cfg["train"]["mixed_precision"] and torch.cuda.is_available()
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-                eps_pred, feat_s = self.model(xt, t, return_features=True)
+                eps_pred, feat_s = self.model(
+                    xt, t, return_features=True, feature_layer=self.feature_layer
+                )
                 student_logits = self.proj_student(feat_s) if self.proj_student is not None else None
 
                 teacher_logits = None
                 if self.teacher is not None:
                     with torch.no_grad():
-                        _, feat_t = self.teacher(xt, t, return_features=True)
+                        _, feat_t = self.teacher(
+                            xt, t, return_features=True, feature_layer=self.feature_layer
+                        )
                         teacher_logits = self.proj_teacher(feat_t) if self.proj_teacher is not None else None
 
                 loss, metrics = total_loss(
@@ -92,8 +110,8 @@ class SDDTrainer:
                     gating_mode=self.cfg["sdd"]["gating"]["mode"],
                     t_min=self.cfg["sdd"]["gating"]["t_min"],
                     t_max=self.cfg["sdd"]["gating"]["t_max"],
-                    soft_mid=self.cfg["sdd"]["gating"]["soft_mid"],
-                    soft_beta=self.cfg["sdd"]["gating"]["soft_beta"],
+                    soft_mid=self.cfg["sdd"]["gating"].get("soft_mid", 0.4),
+                    soft_beta=self.cfg["sdd"]["gating"].get("soft_beta", 0.08),
                 )
                 loss = loss / grad_accum
 

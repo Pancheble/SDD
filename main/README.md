@@ -80,3 +80,61 @@ Open the notebooks in order, starting from data preparation. Each training noteb
 - The trainer uses `tqdm` for live progress visualization.
 - The wandb logger is optional and controlled through config, but enabled by default in the notebooks.
 - Tiny ImageNet validation preparation is included as a notebook step because the raw dataset ships in a non-ImageFolder format.
+
+## New experiments (portfolio additions)
+
+Six new experiments have been added to the notebook suite, each targeting a specific research question:
+
+| Notebook | Experiment | Key question |
+|---|---|---|
+| `11_feature_layer_ablation` | Feature-layer ablation | Which UNet layer is the best distillation target? |
+| `12_training_curves` | Training curves | Does SDD converge faster and improve FID vs baseline? |
+| `13_gating_analysis` | Gating distribution | Which timesteps actually receive distillation signal? |
+| `14_ema_momentum_sweep` | EMA momentum sweep | How sensitive is SDD to teacher staleness? |
+| `15_sample_grid` | Sample comparison grid | Qualitative visual difference between baseline and SDD |
+| `16_umap_tsne_features` | UMAP / t-SNE viz | Does SDD produce more class-separable representations? |
+
+### New API functions
+
+All new experiment functions live in `src/experiments/notebook_api.py` and are exported from `src/experiments/__init__.py`:
+
+```python
+from src.experiments import (
+    # Experiment 1 — feature layer
+    run_feature_layer_ablation, FEATURE_LAYERS,
+
+    # Experiment 2 — training curves
+    train_with_curves, compare_training_curves,
+
+    # Experiment 3 — gating analysis
+    collect_gate_histogram, run_gating_analysis,
+
+    # Experiment 4 — EMA sweep
+    run_ema_momentum_sweep,
+
+    # Experiment 5 — sample grids
+    generate_sample_grid, generate_comparison_grid,
+
+    # Experiment 6 — UMAP / t-SNE
+    run_umap_comparison, run_tsne_comparison,
+)
+```
+
+### Multi-layer feature extraction
+
+`UNetModel.forward()` now accepts a `feature_layer` argument:
+
+```python
+out, feat = model(x, t, return_features=True, feature_layer="skip1")
+# feature_layer options: "bottleneck" (default), "skip1", "skip2", "decoder1"
+```
+
+### Running all tests
+
+```bash
+pytest tests/ -v
+```
+
+The test suite now covers UNet forward/feature extraction, diffusion schedules,
+gating (hard/soft/none), DINO distillation loss, EMA update correctness, and
+the total loss function including per-sample gating behaviour.
