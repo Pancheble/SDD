@@ -81,9 +81,7 @@ Open the notebooks in order, starting from data preparation. Each training noteb
 - The wandb logger is optional and controlled through config, but enabled by default in the notebooks.
 - Tiny ImageNet validation preparation is included as a notebook step because the raw dataset ships in a non-ImageFolder format.
 
-## New experiments (portfolio additions)
-
-Six new experiments have been added to the notebook suite, each targeting a specific research question:
+## New experiments
 
 | Notebook | Experiment | Key question |
 |---|---|---|
