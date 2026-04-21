@@ -30,16 +30,24 @@ The notebooks include dataset download and preparation cells for both datasets.
 
 The project is notebook-first. All experiment and visualization workflows live in `.ipynb` files:
 
-- `01_prepare_data.ipynb`
-- `02_train_baseline_cifar10.ipynb`
-- `03_train_sdd_cifar10.ipynb`
-- `04_train_sdd_tiny_imagenet.ipynb`
-- `05_ablation_sweeps.ipynb`
-- `06_eval_fid.ipynb`
-- `07_eval_linear_probe.ipynb`
-- `08_visualize_features.ipynb`
-- `09_compare_runs.ipynb`
-- `10_timestep_analysis.ipynb`
+| Notebook | Description / Experiment | Key purpose |
+|---|---|---|
+| `01_prepare_data.ipynb` | Data preparation | Download and preprocess CIFAR-10 / Tiny ImageNet |
+| `02_train_baseline_cifar10.ipynb` | Baseline training | Train vanilla diffusion model on CIFAR-10 |
+| `03_train_sdd_cifar10.ipynb` | SDD training (CIFAR-10) | Apply Self-Distilled Diffusion on CIFAR-10 |
+| `04_train_sdd_tiny_imagenet.ipynb` | SDD training (Tiny ImageNet) | Scale SDD to 64x64 dataset |
+| `05_ablation_sweeps.ipynb` | Ablation experiments | Toggle centering, sharpening, gating, etc. |
+| `06_eval_fid.ipynb` | FID evaluation | Quantitative generation quality |
+| `07_eval_linear_probe.ipynb` | Linear probe | Representation quality evaluation |
+| `08_visualize_features.ipynb` | Feature visualization | Inspect learned feature maps |
+| `09_compare_runs.ipynb` | Run comparison | Compare multiple experiment outputs |
+| `10_timestep_analysis.ipynb` | Timestep behavior | Analyze diffusion timestep effects |
+| `11_feature_layer_ablation.ipynb` | Feature-layer ablation | Which UNet layer is the best distillation target? |
+| `12_training_curves.ipynb` | Training curves | Does SDD converge faster and improve FID vs baseline? |
+| `13_gating_analysis.ipynb` | Gating distribution | Which timesteps actually receive distillation signal? |
+| `14_ema_momentum_sweep.ipynb` | EMA momentum sweep | How sensitive is SDD to teacher staleness? |
+| `15_sample_grid.ipynb` | Sample comparison grid | Qualitative visual difference between baseline and SDD |
+| `16_umap_tsne_features.ipynb` | UMAP / t-SNE visualization | Does SDD produce more class-separable representations? |
 
 ## Key ablations
 
@@ -80,19 +88,6 @@ Open the notebooks in order, starting from data preparation. Each training noteb
 - The trainer uses `tqdm` for live progress visualization.
 - The wandb logger is optional and controlled through config, but enabled by default in the notebooks.
 - Tiny ImageNet validation preparation is included as a notebook step because the raw dataset ships in a non-ImageFolder format.
-
-## New experiments (portfolio additions)
-
-Six new experiments have been added to the notebook suite, each targeting a specific research question:
-
-| Notebook | Experiment | Key question |
-|---|---|---|
-| `11_feature_layer_ablation` | Feature-layer ablation | Which UNet layer is the best distillation target? |
-| `12_training_curves` | Training curves | Does SDD converge faster and improve FID vs baseline? |
-| `13_gating_analysis` | Gating distribution | Which timesteps actually receive distillation signal? |
-| `14_ema_momentum_sweep` | EMA momentum sweep | How sensitive is SDD to teacher staleness? |
-| `15_sample_grid` | Sample comparison grid | Qualitative visual difference between baseline and SDD |
-| `16_umap_tsne_features` | UMAP / t-SNE viz | Does SDD produce more class-separable representations? |
 
 ### New API functions
 
