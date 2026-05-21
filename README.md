@@ -16,7 +16,7 @@ Denoising diffusion probabilistic models (DDPMs) have established themselves as 
 
 $$\mathcal{L}_{\text{simple}} = \mathbb{E}_{x_0, \epsilon, t} \left[ \| \epsilon - \epsilon_\theta(x_t, t) \|^2 \right]$$
 
-where $$x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon$$ is the noisy image at timestep $t$, and $\epsilon_\theta$ is a neural network (typically a UNet or DiT) learning to predict the added noise.
+where $x\_t = \sqrt{\bar{\alpha}\_t} x\_0 + \sqrt{1 - \bar{\alpha}\_t} \epsilon$ is the noisy image at timestep $t$, and $\epsilon_\theta$ is a neural network (typically a UNet or DiT) learning to predict the added noise.
 
 This regression objective has a fundamental limitation: it provides no explicit incentive for the model to build structured, semantically meaningful internal representations. Recent empirical studies have confirmed that diffusion models trained solely with this objective produce representations significantly inferior to those of dedicated discriminative models such as DINOv2, even after extended training.
 
