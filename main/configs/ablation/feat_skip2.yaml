@@ -1,9 +1,0 @@
-name: feat_skip2
-sdd:
-  enabled: true
-  feature_layer: skip2
-  use_centering: true
-  use_sharpening: true
-  use_gating: true
-  use_projection_head: true
-  lambda_distill: 0.5

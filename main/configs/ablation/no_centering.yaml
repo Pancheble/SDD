@@ -1,8 +1,0 @@
-name: no_centering
-sdd:
-  enabled: true
-  use_centering: false
-  use_sharpening: true
-  use_gating: true
-  use_projection_head: true
-  lambda_distill: 0.5

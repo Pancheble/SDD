@@ -1,8 +1,0 @@
-name: ema_only
-sdd:
-  enabled: true
-  use_centering: false
-  use_sharpening: false
-  use_gating: false
-  use_projection_head: false
-  lambda_distill: 0.5
